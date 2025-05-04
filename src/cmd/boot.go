@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"log"
 	"mysql-verifier/src/lib"
 	"os"
 	"time"
@@ -188,7 +189,7 @@ func readDatabaseSchema() {
 }
 
 func readDatabaseSchemaFromDatabase() {
-	query := "SELECT table_name, table_rows, ROUND((data_length + index_length) / 1024 / 1024, 2) AS size_mb FROM information_schema.TABLES WHERE table_schema = ? ORDER BY table_rows ASC"
+	query := "SELECT TABLE_NAME, TABLE_ROWS, ROUND((DATA_LENGTH + INDEX_LENGTH) / 1024 / 1024, 2) AS size_mb FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? ORDER BY TABLE_ROWS ASC"
 
 	rows, err := dbCon.Connection.Query(query, config.Database.Database)
 	if err != nil {
@@ -211,6 +212,9 @@ func readDatabaseSchemaFromDatabase() {
 			fmt.Printf("error scanning row: %s\n", err.Error())
 			return
 		}
+
+		readTableSchema(&t)
+
 		tables = append(tables, t)
 	}
 
@@ -220,6 +224,33 @@ func readDatabaseSchemaFromDatabase() {
 	}
 
 	return
+}
+
+func readTableSchema(t *TableInfo) {
+	rows, err := dbCon.Connection.Query("SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?", dbCon.Config.Database, t.Name)
+	if err != nil {
+		fmt.Printf("error querying database: %s\n", err.Error())
+		return
+	}
+	defer func() {
+		if err = rows.Close(); err != nil {
+			fmt.Printf("error closing rows: %s\n", err.Error())
+		}
+	}()
+	hasIdColumn := false
+	columnSize := 0
+	for rows.Next() {
+		var columnName string
+		if err = rows.Scan(&columnName); err != nil {
+			log.Fatal(err)
+		}
+		if columnName == "id" {
+			hasIdColumn = true
+		}
+		columnSize++
+	}
+	t.ColumnSize = &columnSize
+	t.HasIDColumn = hasIdColumn
 }
 
 func readDatabaseSchemaFromCSVFile() {
@@ -294,24 +325,26 @@ func verifyDatabase() {
 		In:       config.In,
 		Out:      config.Out,
 		Schema:   config.Schema,
-		Start:    "",
-		End:      "",
+		Start:    0,
+		End:      0,
 		Duration: "",
 		Tables:   map[string]TableInfo{},
 		Status:   "",
 	}
 
 	for _, table := range tables {
+		fmt.Println("-----------------------------------------")
 		start := time.Now()
 		fmt.Printf("verifying table: %s\n", table.Name)
 		newTable := verifyTable(table)
-		result.Tables[newTable.Name] = newTable
 		end := time.Now()
-		result.Duration += fmt.Sprintf("%s\n", end.Sub(start))
+		duration := end.Sub(start)
+		newTable.Duration = fmt.Sprintf("%s", duration)
+		result.Tables[newTable.Name] = newTable
 		fmt.Printf("duration: %s\n", end.Sub(start))
 	}
 
-	currentResult = &result
+	currentResult = result
 }
 
 func verifyTable(table TableInfo) TableInfo {
@@ -325,38 +358,47 @@ func verifyTable(table TableInfo) TableInfo {
 	fmt.Printf("rows: %d\n", count)
 	table.CountRows = count
 
-	query = fmt.Sprintf("SELECT MAX(id) FROM %s", table.Name)
-	row = dbCon.Connection.QueryRow(query)
-	var maxId string
-	if err := row.Scan(&maxId); err != nil {
-		fmt.Printf("error scanning row: %s\n", err.Error())
-	} else {
-		fmt.Printf("max id: %s\n", maxId)
-		table.MaxId = &maxId
-	}
-
-	query = fmt.Sprintf("SELECT * FROM %s LIMIT 1", table.Name)
-	rows, err := dbCon.Connection.Query(query)
-	if err != nil {
-		fmt.Printf("error querying database: %s\n", err.Error())
-	} else {
-		defer func() {
-			_ = rows.Close()
-		}()
-
-		if rows.Next() {
-			var lastRow map[string]interface{}
-			if err = rows.Scan(&lastRow); err != nil {
+	if table.ColumnSize != nil && *table.ColumnSize > 0 && table.CountRows > 0 {
+		if table.HasIDColumn {
+			query = fmt.Sprintf("SELECT MAX(id) FROM %s", table.Name)
+			row = dbCon.Connection.QueryRow(query)
+			var maxId string
+			if err := row.Scan(&maxId); err != nil {
 				fmt.Printf("error scanning row: %s\n", err.Error())
 			} else {
-				strJson, err := json.Marshal(lastRow)
-				if err != nil {
-					fmt.Printf("error marshalling row: %s\n", err.Error())
+				fmt.Printf("max id: %s\n", maxId)
+				table.MaxId = &maxId
+			}
+		}
+
+		query = fmt.Sprintf("SELECT * FROM %s LIMIT 1", table.Name)
+		row = dbCon.Connection.QueryRow(query)
+		lastRow := make([]interface{}, *table.ColumnSize)
+		for i := range lastRow {
+			lastRow[i] = new(interface{})
+		}
+		if err := row.Scan(lastRow...); err != nil {
+			fmt.Printf("error scanning row: %s\n", err.Error())
+		} else {
+			strRow := make([]interface{}, *table.ColumnSize)
+			for i := range lastRow {
+				lastRowCol := lastRow[i]
+				if lastRowCol != nil {
+					lastRowColValue := *(lastRowCol.(*interface{}))
+					strRow[i] = lastRowColValue
 				} else {
-					fmt.Printf("last row: %s\n", string(strJson))
-					hash := fmt.Sprintf("%x", sha256.Sum256(strJson))
-					table.Hash = hash
+					strRow[i] = ""
 				}
+			}
+			byJson, jsonErr := json.Marshal(strRow)
+			if jsonErr != nil {
+				fmt.Printf("error marshalling row: %s\n", jsonErr.Error())
+			} else {
+				strJson := string(byJson)
+				fmt.Printf("last row: %s\n", strJson)
+				hash := fmt.Sprintf("%x", sha256.Sum256(byJson))
+				table.LastRow = &strRow
+				table.Hash = hash
 			}
 		}
 	}
@@ -375,10 +417,6 @@ func verifyTable(table TableInfo) TableInfo {
 
 func compareDatabase() {
 	if previousResult == nil {
-		return
-	}
-
-	if currentResult == nil {
 		return
 	}
 
@@ -402,6 +440,12 @@ func compareDatabase() {
 }
 
 func writeOutputFile() {
+	now := time.Now()
+	currentResult.Start = initStart.Unix()
+	currentResult.End = now.Unix()
+	duration := now.Sub(initStart)
+	currentResult.Duration = fmt.Sprintf("%s", duration)
+
 	if len(config.Out) > 0 {
 		content, err := json.MarshalIndent(currentResult, "", "  ")
 		if err != nil {
@@ -430,10 +474,6 @@ func shutdown() {
 
 	if previousResult != nil {
 		previousResult = nil
-	}
-
-	if currentResult != nil {
-		currentResult = nil
 	}
 
 	if tables != nil {

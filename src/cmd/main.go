@@ -1,8 +1,13 @@
 package main
 
-import "mysql-verifier/src/lib"
+import (
+	"mysql-verifier/src/lib"
+	"time"
+)
 
 var (
+	initStart time.Time
+
 	configFilename *string
 	inputFileName  *string
 	outputFileName *string
@@ -16,10 +21,11 @@ var (
 	dbCon          *lib.DatabaseClient
 	tables         []TableInfo
 	previousResult *Result
-	currentResult  *Result
+	currentResult  Result
 )
 
 func main() {
+	initStart = time.Now()
 	readArgs()
 	readFlags()
 	initConfig()
