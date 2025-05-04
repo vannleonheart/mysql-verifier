@@ -9,6 +9,8 @@ import (
 	"log"
 	"mysql-verifier/src/lib"
 	"os"
+	"reflect"
+	"strings"
 	"time"
 )
 
@@ -273,13 +275,17 @@ func readDatabaseSchemaFromCSVFile() {
 	}
 	for _, record := range records {
 		tables = append(tables, TableInfo{
-			Name:       record[0],
-			SchemaRows: 0,
-			CountRows:  0,
-			SizeInMB:   0,
-			MaxId:      nil,
-			LastRow:    nil,
-			Hash:       "",
+			Name:         record[0],
+			SchemaRows:   0,
+			SizeInMB:     0,
+			ColumnSize:   nil,
+			HasIDColumn:  false,
+			CountRows:    0,
+			MaxId:        nil,
+			LastRow:      nil,
+			StringToHash: "",
+			Hash:         "",
+			Duration:     "",
 		})
 	}
 
@@ -372,7 +378,10 @@ func verifyTable(table TableInfo) TableInfo {
 		}
 
 		query = fmt.Sprintf("SELECT * FROM %s LIMIT 1", table.Name)
-		row = dbCon.Connection.QueryRow(query)
+		if table.MaxId != nil {
+			query = fmt.Sprintf("SELECT * FROM %s WHERE id = ? LIMIT 1", table.Name)
+		}
+		row = dbCon.Connection.QueryRow(query, table.MaxId)
 		lastRow := make([]interface{}, *table.ColumnSize)
 		for i := range lastRow {
 			lastRow[i] = new(interface{})
@@ -385,21 +394,30 @@ func verifyTable(table TableInfo) TableInfo {
 				lastRowCol := lastRow[i]
 				if lastRowCol != nil {
 					lastRowColValue := *(lastRowCol.(*interface{}))
+					if lastRowColValue == nil {
+						strRow[i] = ""
+						continue
+					}
+					lastRowColValueType := reflect.TypeOf(lastRowColValue).Kind()
+					if lastRowColValueType == reflect.Slice {
+						lastRowColValue = strings.TrimSpace(string(lastRowColValue.([]uint8)))
+					}
 					strRow[i] = lastRowColValue
 				} else {
 					strRow[i] = ""
 				}
 			}
-			byJson, jsonErr := json.Marshal(strRow)
-			if jsonErr != nil {
-				fmt.Printf("error marshalling row: %s\n", jsonErr.Error())
-			} else {
-				strJson := string(byJson)
-				fmt.Printf("last row: %s\n", strJson)
-				hash := fmt.Sprintf("%x", sha256.Sum256(byJson))
-				table.LastRow = &strRow
-				table.Hash = hash
+			strToSign := ""
+			for i := range strRow {
+				strToSign += fmt.Sprintf("%v", strRow[i])
 			}
+			fmt.Printf("last row: %v\n", strRow)
+			hasher := sha256.New()
+			hasher.Write([]byte(strToSign))
+			hash := fmt.Sprintf("%x", hasher.Sum(nil))
+			table.StringToHash = strToSign
+			table.LastRow = &strRow
+			table.Hash = hash
 		}
 	}
 
