@@ -26,8 +26,8 @@ var (
 
 func main() {
 	initStart = time.Now()
-	readArgs()
 	readFlags()
+	readArgs()
 	initConfig()
 	validateConfig()
 	connectToDatabase()

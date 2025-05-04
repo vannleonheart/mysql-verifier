@@ -28,6 +28,20 @@ func readArgs() {
 			outputDir = &args[1]
 		}
 		exportConfig(outputDir)
+	case "schema-export", "se":
+		if len(args) > 1 {
+			configFilename = &args[1]
+		}
+		initConfig()
+		validateConfig()
+		connectToDatabase()
+		readDatabaseSchemaFromDatabase()
+		var outputDir *string
+		if len(args) > 2 {
+			outputDir = &args[2]
+		}
+		exportTableSchema(outputDir)
+
 	}
 }
 
